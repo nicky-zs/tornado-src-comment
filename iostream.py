@@ -460,6 +460,132 @@ class IOStream(object):
             self.io_loop.update_handler(self.socket.fileno(), self._state)
 
 
+class SSLIOStream(IOStream):
+    """A utility class to write to and read from a non-blocking SSL socket.
+
+    If the socket passed to the constructor is already connected,
+    it should be wrapped with::
+
+        ssl.wrap_socket(sock, do_handshake_on_connect=False, **kwargs)
+
+    before constructing the SSLIOStream.  Unconnected sockets will be
+    wrapped when IOStream.connect is finished.
+    """
+    def __init__(self, *args, **kwargs):
+        """Creates an SSLIOStream.
+
+        If a dictionary is provided as keyword argument ssl_options,
+        it will be used as additional keyword arguments to ssl.wrap_socket.
+        """
+        self._ssl_options = kwargs.pop('ssl_options', {})
+        super(SSLIOStream, self).__init__(*args, **kwargs)
+        self._ssl_accepting = True
+        self._handshake_reading = False
+        self._handshake_writing = False
+        self._ssl_connect_callback = None
+
+    def reading(self):
+        return self._handshake_reading or super(SSLIOStream, self).reading()
+
+    def writing(self):
+        return self._handshake_writing or super(SSLIOStream, self).writing()
+
+    def _do_ssl_handshake(self):
+        # Based on code from test_ssl.py in the python stdlib
+        try:
+            self._handshake_reading = False
+            self._handshake_writing = False
+            self.socket.do_handshake()
+        except ssl.SSLError, err:
+            if err.args[0] == ssl.SSL_ERROR_WANT_READ:
+                self._handshake_reading = True
+                return
+            elif err.args[0] == ssl.SSL_ERROR_WANT_WRITE:
+                self._handshake_writing = True
+                return
+            elif err.args[0] in (ssl.SSL_ERROR_EOF,
+                                 ssl.SSL_ERROR_ZERO_RETURN):
+                return self.close()
+            elif err.args[0] == ssl.SSL_ERROR_SSL:
+                try:
+                    peer = self.socket.getpeername()
+                except:
+                    peer = '(not connected)'
+                logging.warning("SSL Error on %d %s: %s",
+                                self.socket.fileno(), peer, err)
+                return self.close()
+            raise
+        except socket.error, err:
+            if err.args[0] in (errno.ECONNABORTED, errno.ECONNRESET):
+                return self.close()
+        else:
+            self._ssl_accepting = False
+            if self._ssl_connect_callback is not None:
+                callback = self._ssl_connect_callback
+                self._ssl_connect_callback = None
+                self._run_callback(callback)
+
+    def _handle_read(self):
+        if self._ssl_accepting:
+            self._do_ssl_handshake()
+            return
+        super(SSLIOStream, self)._handle_read()
+
+    def _handle_write(self):
+        if self._ssl_accepting:
+            self._do_ssl_handshake()
+            return
+        super(SSLIOStream, self)._handle_write()
+
+    def connect(self, address, callback=None):
+        # Save the user's callback and run it after the ssl handshake
+        # has completed.
+        self._ssl_connect_callback = callback
+        super(SSLIOStream, self).connect(address, callback=None)
+
+    def _handle_connect(self):
+        # When the connection is complete, wrap the socket for SSL
+        # traffic.  Note that we do this by overriding _handle_connect
+        # instead of by passing a callback to super().connect because
+        # user callbacks are enqueued asynchronously on the IOLoop,
+        # but since _handle_events calls _handle_connect immediately
+        # followed by _handle_write we need this to be synchronous.
+        self.socket = ssl.wrap_socket(self.socket,
+                                      do_handshake_on_connect=False,
+                                      **self._ssl_options)
+        super(SSLIOStream, self)._handle_connect()
+
+    def _read_from_socket(self):
+        if self._ssl_accepting:
+            # If the handshake hasn't finished yet, there can't be anything
+            # to read (attempting to read may or may not raise an exception
+            # depending on the SSL version)
+            return None
+        try:
+            # SSLSocket objects have both a read() and recv() method,
+            # while regular sockets only have recv().
+            # The recv() method blocks (at least in python 2.6) if it is
+            # called when there is nothing to read, so we have to use
+            # read() instead.
+            chunk = self.socket.read(self.read_chunk_size)
+        except ssl.SSLError, e:
+            # SSLError is a subclass of socket.error, so this except
+            # block must come first.
+            if e.args[0] == ssl.SSL_ERROR_WANT_READ:
+                return None
+            else:
+                raise
+        except socket.error, e:
+            if e.args[0] in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return None
+            else:
+                raise
+        if not chunk:
+            self.close()
+            return None
+        return chunk
+
+
 def _double_prefix(deque):
     """Grow by doubling, but don't split the second chunk just because the first one is small. """
     new_len = max(len(deque[0])*2, (len(deque[0])+len(deque[1])))
