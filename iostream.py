@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# vim: fileencoding=utf-8
 #
 # Reading the fucking source code.
 
@@ -59,7 +60,6 @@ class IOStream(object):
     def connect(self, address, callback=None):
         """ 发起连接 """
         self._connecting = True # 收到可写通知时检查此标志
-        
         try:
             self.socket.connect(address) # 非阻塞的连接过程参见`man 2 connect`的EINPROGRESS
         except socket.error, e:
@@ -71,22 +71,20 @@ class IOStream(object):
         self._add_io_state(self.io_loop.WRITE) # 注册写通知到io_loop(参见`man 2 connect`)
 
     def read_until_regex(self, regex, callback):
-        """ 读取直到某一正则 """
+        """ 读取直到某一正则。 """
         self._set_read_callback(callback) # 设置读回调
         self._read_regex = re.compile(regex) # 设置正则
         self._try_inline_read()
 
     def read_until(self, delimiter, callback):
-        """ 读取直到某一分隔符 """
+        """ 读取直到某一分隔符。 """
         self._set_read_callback(callback) # 设置读回调
         self._read_delimiter = delimiter # 设置定界符
         self._try_inline_read()
 
     def read_bytes(self, num_bytes, callback, streaming_callback=None):
-        """ 读取固定的字符数 """
-
-        """ If a ``streaming_callback`` is given, it will be called with chunks of data as they become available,
-        and the argument to the final ``callback`` will be empty. """
+        """ 读取固定的字符数。 """
+        """ 如果streaming_callback不为空，则它将处理所有的数据，callback得到的参数将为空。 """
         self._set_read_callback(callback)
         assert isinstance(num_bytes, (int, long))
         self._read_bytes = num_bytes # 设置要读取的字符数，否则为None
@@ -94,14 +92,11 @@ class IOStream(object):
         self._try_inline_read()
 
     def read_until_close(self, callback, streaming_callback=None):
-        """ 读取直到关闭 """
-
-        """ If a ``streaming_callback`` is given, it will be called with chunks of data as they become available,
-        and the argument to the final ``callback`` will be empty.
-        Subject to ``max_buffer_size`` limit from `IOStream` constructor if a ``streaming_callback`` is not used. """
+        """ 读取直到关闭。 """
+        """ 如果streaming_callback不为空，则它将处理所有的数据，callback得到的参数将为空。 """
         self._set_read_callback(callback)
         self._streaming_callback = stack_context.wrap(streaming_callback)
-        if self.closed():
+        if self.closed(): # 如果已经关闭则一次性消费完整个_read_buffer然后返回
             if self._streaming_callback is not None:
                 self._run_callback(self._streaming_callback, self._consume(self._read_buffer_size))
             self._run_callback(self._read_callback, self._consume(self._read_buffer_size))
@@ -109,7 +104,7 @@ class IOStream(object):
             self._read_callback = None
             return
         self._read_until_close = True
-        self._streaming_callback = stack_context.wrap(streaming_callback)
+        self._streaming_callback = stack_context.wrap(streaming_callback) # 设置好_streaming_callback后注册io_loop
         self._add_io_state(self.io_loop.READ)
 
     def write(self, data, callback=None):
@@ -142,7 +137,7 @@ class IOStream(object):
             self._maybe_add_error_listener()
 
     def set_close_callback(self, callback):
-        """ 设置关闭回调，有可能会在_maybe_run_close_callback中被调用。 """
+        """ 设置关闭回调，有可能会在_maybe_run_close_callback中被调用（回调无参数）。 """
         self._close_callback = stack_context.wrap(callback)
 
     def close(self):
@@ -212,7 +207,7 @@ class IOStream(object):
             if self.writing():
                 state |= self.io_loop.WRITE
             if state == self.io_loop.ERROR:
-                state |= self.io_loop.READ
+                state |= self.io_loop.READ # 默认还是读
             # 处理完读/写/错误后，如果状态有变则更新该socket上的监听状态
             if state != self._state:
                 assert self._state is not None, "shouldn't happen: _handle_events without self._state"
@@ -244,16 +239,14 @@ class IOStream(object):
             self._pending_callbacks += 1
             self.io_loop.add_callback(wrapper)
 
-    def _handle_read(self): # 处理读事件
+    def _handle_read(self): # 在io_loop的迭代中处理读事件
         try:
             try:
                 # 假装有一个pending，防止_read_to_buffer直接把连接关了。
                 self._pending_callbacks += 1
+                # 第一步：不断地读取网络数据以填充_read_buffer，直到阻塞或者EOF
                 while True:
-                    # Read from the socket until we get EWOULDBLOCK or equivalent.
-                    # SSL sockets do some internal buffering, and if the data is sitting in the SSL object's buffer
-                    # select() and friends can't see it; the only way to find out if it's there is to try to read it.
-                    if self._read_to_buffer() == 0: # 读取网络数据以填充_read_buffer，直到阻塞或者EOF
+                    if self._read_to_buffer() == 0:
                         break
             finally:
                 self._pending_callbacks -= 1
@@ -261,7 +254,8 @@ class IOStream(object):
             logging.warning("error on read", exc_info=True)
             self.close()
             return
-        if self._read_from_buffer(): # 从_read_buffer里读
+        # 第二步：调用_read_from_buffer来完成读操作。如果_read_from_buffer返回False则根据是否已经关闭来调用关闭回调。
+        if self._read_from_buffer():
             return
         else:
             self._maybe_run_close_callback()
@@ -272,12 +266,13 @@ class IOStream(object):
 
     def _try_inline_read(self):
         """ 尝试从缓冲区中完成当前的读操作。 """
-
         """ 如果读操作可以在未阻塞的情况下完成，则在下一次ioloop中调用读回调；否则在socket上开始监听读。 """
-        if self._read_from_buffer(): # 如果可以从buffer中读
+        # 第一步：尝试调用_read_from_buffer完成读操作。如果返回了True则认为操作成功。
+        if self._read_from_buffer():
             return
+        # 第二步：如果_read_from_buffer返回False(其实此时可能已经读了一些了)，则重新填充_read_buffer。
         self._check_closed()
-        try: # 否则重新填充_read_buffer
+        try:
             self._pending_callbacks += 1
             while True:
                 if self._read_to_buffer() == 0:
@@ -285,9 +280,11 @@ class IOStream(object):
                 self._check_closed()
         finally:
             self._pending_callbacks -= 1
+        # 第三步：再次尝试从_read_buffer中读取数据并返回。
         if self._read_from_buffer():
             return
-        self._maybe_add_error_listener() # 还是不能读就???
+        # 第四步：如果_read_buffer还是返回False就: 1.在关闭时调用下关闭回调; 2.否则在io_loop上注册读取通知;
+        self._maybe_add_error_listener()
 
     def _read_from_socket(self):
         """ 从socket中读取数据，并返回读到的字符串。这是真正读网络数据的方法。 """
@@ -324,23 +321,29 @@ class IOStream(object):
         return len(chunk)
 
     def _read_from_buffer(self):
-        """ 试着从buffer中完成当前的读操作。如果读操作顺利完成则返回True，如果buffer不够用则返回False。 """
+        """ 试着从buffer中完成当前的读操作。该方法会调用当前的所有callback以完成读操作。 """
+        """ 如果读操作顺利完成则返回True，如果buffer不够用则返回False。 只会在_handle_read和_try_inline_read中被调用。 """
         if self._streaming_callback is not None and self._read_buffer_size:
             # 如果设置了_streaming_callback则所有的读取块都要交给_streaming_callback处理一遍
-            # 如果不是要求读取固定字节数则全部处理了，之后_read_buffer为空;
+            # 如果不是要求读取固定字节数，则把整个_read_buffer都处理了，之后_read_buffer为空;
             bytes_to_consume = self._read_buffer_size
             if self._read_bytes is not None:
                 # 如果要求读取固定字节数，则要么把_read_buffer读空，要么读满_read_bytes个字符，使_read_bytes变为0
                 bytes_to_consume = min(self._read_bytes, bytes_to_consume)
                 self._read_bytes -= bytes_to_consume
-            self._run_callback(self._streaming_callback, self._consume(bytes_to_consume))
+            self._run_callback(self._streaming_callback, self._consume(bytes_to_consume)) # 把读的结果丢给_streaming_callback
+
+        # _streaming_callback只可能在read_bytes和read_until_close中被设置：
+        # 1.read_bytes: 那么_read_bytes不为None，_read_buffer_size>=_read_bytes可真可假:
+        #   若_read_buffer里还可能有剩余的内容，则返回True(空调一次_read_callback并清空_streaming_callback)；否则返回False。
+        # 2.read_until_close: 那么下面的所有if都不成立，直接返回False。这时_streaming_callback不会被清空。
 
         if self._read_bytes is not None and self._read_buffer_size >= self._read_bytes:
             # 如果是要读取固定的字符数，且该数值小于等于buffer中已经缓存的数量，则直接读取并返回
             num_bytes = self._read_bytes
             callback = self._read_callback
             self._read_callback = None # 清空_read_callback
-            self._streaming_callback = None # 清空了_streaming_callback, why?
+            self._streaming_callback = None # 清空了_streaming_callback, 因为这时调用的是read_bytes，再有数据到达时不当作流处理。
             self._read_bytes = None # 清空_read_bytes
             self._run_callback(callback, self._consume(num_bytes)) # 把_read_bytes个字符丢给callback
             return True
@@ -356,9 +359,9 @@ class IOStream(object):
                         self._read_delimiter = None # 清空_read_delimiter
                         self._run_callback(callback, self._consume(loc + delimiter_len))
                         return True
-                    if len(self._read_buffer) == 1: # 如果_read_buffer所有的chunk都合并了还没找到就退出
+                    if len(self._read_buffer) == 1: # 如果_read_buffer所有的chunk都合并了还没找到就退出，返回False
                         break
-                    _double_prefix(self._read_buffer)
+                    _double_prefix(self._read_buffer) # 合并_read_buffer的前面几个chunk
         elif self._read_regex is not None:
             if self._read_buffer:
                 while True:
@@ -370,9 +373,9 @@ class IOStream(object):
                         self._read_regex = None # 清空_read_regex
                         self._run_callback(callback, self._consume(m.end()))
                         return True
-                    if len(self._read_buffer) == 1: # 如果_read_buffer所有的chunk都合并了还没找到就退出
+                    if len(self._read_buffer) == 1: # 如果_read_buffer所有的chunk都合并了还没找到就退出，返回False
                         break
-                    _double_prefix(self._read_buffer)
+                    _double_prefix(self._read_buffer) # 合并_read_buffer的前面几个chunk
         return False
 
     def _handle_connect(self): # 处理连接事件，参见`man 2 connect` EINPROGRESS
@@ -442,14 +445,14 @@ class IOStream(object):
             raise IOError("Stream is closed")
 
     def _maybe_add_error_listener(self):
-        if self._state is None and self._pending_callbacks == 0: # self._state只在初始时和关闭时是None
+        if self._state is None and self._pending_callbacks == 0:
             if self.socket is None: # 关闭时
                 self._maybe_run_close_callback()
             else: # 开始时
                 self._add_io_state(ioloop.IOLoop.READ)
 
-    def _add_io_state(self, state): # 在io_loop上注册事件通知的唯一方法.
-        if self.socket is None: # 已经关闭就直接返回
+    def _add_io_state(self, state): # 在io_loop上注册事件通知(io_loop.add_handler)的唯一方法.
+        if self.socket is None: # 如果连接已经关闭就直接返回
             return
         if self._state is None: # 之前完全没注册过，则直接将参数state与上ERROR注册
             self._state = ioloop.IOLoop.ERROR | state
