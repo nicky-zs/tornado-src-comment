@@ -54,80 +54,42 @@ class IOLoop(object):
 
         self._callback_lock = threading.Lock() # 回调锁
 
-        self._handlers = {} # IO处理器
+        self._handlers = {} # 处理函数集合
         self._events = {}
         self._callbacks = [] # 回调函数集合
-        self._timeouts = [] # 基于时间的调度
+        self._timeouts = [] # 基于时间的调度，_timeouts是个堆
 
-        self._running = False
+        self._running = False # 运行标志
         self._stopped = False
         self._thread_ident = None
         self._blocking_signal_threshold = None
 
-        # Create a pipe that we send bogus data to when we want to wake
-        # the I/O loop when it is idle
+        # 创建一个管道，当我们想在ioloop空闲时唤醒它就通过管道发送假的数据
         self._waker = Waker()
-        self.add_handler(self._waker.fileno(),
-                         lambda fd, events: self._waker.consume(),
-                         self.READ)
+        self.add_handler(self._waker.fileno(), lambda fd, events: self._waker.consume(), self.READ)
 
     @staticmethod
     def instance():
-        """Returns a global IOLoop instance.
-
-        Most single-threaded applications have a single, global IOLoop.
-        Use this method instead of passing around IOLoop instances
-        throughout your code.
-
-        A common pattern for classes that depend on IOLoops is to use
-        a default argument to enable programs with multiple IOLoops
-        but not require the argument for simpler applications::
-
-            class MyClass(object):
-                def __init__(self, io_loop=None):
-                    self.io_loop = io_loop or IOLoop.instance()
-        """
+        """ 返回全局ioloop单例。 """
         if not hasattr(IOLoop, "_instance"):
             with IOLoop._instance_lock:
                 if not hasattr(IOLoop, "_instance"):
-                    # New instance after double check
                     IOLoop._instance = IOLoop()
         return IOLoop._instance
 
     @staticmethod
     def initialized():
-        """Returns true if the singleton instance has been created."""
+        """ 全局ioloop单例是否已经生成。 """
         return hasattr(IOLoop, "_instance")
 
     def install(self):
-        """Installs this IOloop object as the singleton instance.
-
-        This is normally not necessary as `instance()` will create
-        an IOLoop on demand, but you may want to call `install` to use
-        a custom subclass of IOLoop.
-        """
+        """ 将当前的ioloop注册为全局ioloop单例。用于子类。 """
         assert not IOLoop.initialized()
         IOLoop._instance = self
 
     def close(self, all_fds=False):
-        """Closes the IOLoop, freeing any resources used.
-
-        If ``all_fds`` is true, all file descriptors registered on the
-        IOLoop will be closed (not just the ones created by the IOLoop itself).
-
-        Many applications will only use a single IOLoop that runs for the
-        entire lifetime of the process.  In that case closing the IOLoop
-        is not necessary since everything will be cleaned up when the
-        process exits.  `IOLoop.close` is provided mainly for scenarios
-        such as unit tests, which create and destroy a large number of
-        IOLoops.
-
-        An IOLoop must be completely stopped before it can be closed.  This
-        means that `IOLoop.stop()` must be called *and* `IOLoop.start()` must
-        be allowed to return before attempting to call `IOLoop.close()`.
-        Therefore the call to `close` will usually appear just after
-        the call to `start` rather than near the call to `stop`.
-        """
+        """ 关闭ioloop，并释放所有使用到的资源。关闭之前必须先stop。
+        如果all_fds是True，则同时关闭所有注册到该ioloop上的文件描述符。 """
         self.remove_handler(self._waker.fileno())
         if all_fds:
             for fd in self._handlers.keys()[:]:
@@ -135,246 +97,161 @@ class IOLoop(object):
                     os.close(fd)
                 except Exception:
                     logging.debug("error closing fd %s", fd, exc_info=True)
-        self._waker.close()
-        self._impl.close()
+        self._waker.close() # 释放_waker管道
+        self._impl.close() # 释放epoll实例
 
     def add_handler(self, fd, handler, events):
-        """Registers the given handler to receive the given events for fd."""
-        self._handlers[fd] = stack_context.wrap(handler)
-        self._impl.register(fd, events | self.ERROR)
+        """ 为给定的文件描述符fd注册events事件的处理函数handler。 """
+        self._handlers[fd] = stack_context.wrap(handler) # 在_handlers字典中以fd为键加入handler处理函数
+        self._impl.register(fd, events | self.ERROR) # 在epoll实例上为fd注册感兴趣的事件events|ERROR
 
     def update_handler(self, fd, events):
-        """Changes the events we listen for fd."""
+        """ 改变给定的文件描述符fd感兴趣的事件。 """
         self._impl.modify(fd, events | self.ERROR)
 
     def remove_handler(self, fd):
-        """Stop listening for events on fd."""
-        self._handlers.pop(fd, None)
-        self._events.pop(fd, None)
+        """ 移除给定的文件描述符的事件处理。 """
+        self._handlers.pop(fd, None) # 把fd及其对应的handler从_handlers中移除
+        self._events.pop(fd, None) # 把fd及其对应的未处理事件从_events中移除
         try:
-            self._impl.unregister(fd)
+            self._impl.unregister(fd) # 在epoll实例上移动文件描述符fd的注册
         except (OSError, IOError):
             logging.debug("Error deleting fd from IOLoop", exc_info=True)
 
     def set_blocking_signal_threshold(self, seconds, action):
-        """Sends a signal if the ioloop is blocked for more than s seconds.
-
-        Pass seconds=None to disable.  Requires python 2.6 on a unixy
-        platform.
-
-        The action parameter is a python signal handler.  Read the
-        documentation for the python 'signal' module for more information.
-        If action is None, the process will be killed if it is blocked for
-        too long.
-        """
+        """ 当ioloop阻塞超过seconds秒之后，发送一个信号。若seconds=None则不发送信号。 """
         if not hasattr(signal, "setitimer"):
-            logging.error("set_blocking_signal_threshold requires a signal module "
-                       "with the setitimer method")
+            logging.error("set_blocking_signal_threshold requires a signal module with the setitimer method")
             return
-        self._blocking_signal_threshold = seconds
+        self._blocking_signal_threshold = seconds # 先记下秒数，闹钟不在此处设置
         if seconds is not None:
-            signal.signal(signal.SIGALRM,
-                          action if action is not None else signal.SIG_DFL)
+            signal.signal(signal.SIGALRM, action if action is not None else signal.SIG_DFL) # 设置信号处理函数
 
     def set_blocking_log_threshold(self, seconds):
-        """Logs a stack trace if the ioloop is blocked for more than s seconds.
-        Equivalent to set_blocking_signal_threshold(seconds, self.log_stack)
-        """
+        """ 当ioloop阻塞超过seconds秒之后，log一下stack。若seconds=None则不发送信号。 """
         self.set_blocking_signal_threshold(seconds, self.log_stack)
 
     def log_stack(self, signal, frame):
-        """Signal handler to log the stack trace of the current thread.
-
-        For use with set_blocking_signal_threshold.
-        """
+        """ 信号处理函数。记录当前线程的stack trace。与set_blocking_signal_threshold一起使用。 """
         logging.warning('IOLoop blocked for %f seconds in\n%s',
-                        self._blocking_signal_threshold,
-                        ''.join(traceback.format_stack(frame)))
+                self._blocking_signal_threshold, ''.join(traceback.format_stack(frame)))
 
     def start(self):
-        """Starts the I/O loop.
-
-        The loop will run until one of the I/O handlers calls stop(), which
-        will make the loop stop after the current event iteration completes.
-        """
+        """ 开始IO事件循环。
+        IO事件循环开始后，会一直运行到某一个handler调用了stop方法，这将使得循环在处理完当前事件之后停止。 """
         if self._stopped:
             self._stopped = False
             return
-        self._thread_ident = thread.get_ident()
+        self._thread_ident = thread.get_ident() # 记录IOLoop所在的线程的id，用来判断操作是否在IOLoop线程
         self._running = True
         while True:
-            poll_timeout = 3600.0
+            poll_timeout = 3600.0 # epoll的等待超时时间
 
-            # Prevent IO event starvation by delaying new callbacks
-            # to the next iteration of the event loop.
+            # 将新的callback推迟到下一轮事件循环中调用，以防止IO事件饥饿
             with self._callback_lock:
                 callbacks = self._callbacks
-                self._callbacks = []
-            for callback in callbacks:
+                self._callbacks = [] # 新的callback会加入到这个空的self._callbacks中
+            for callback in callbacks: # 只运行callbacks里的callback
                 self._run_callback(callback)
 
-            if self._timeouts:
+            if self._timeouts: # 基于时间的调度
                 now = time.time()
-                while self._timeouts:
-                    if self._timeouts[0].callback is None:
-                        # the timeout was cancelled
+                while self._timeouts: # _timeouts[0]是timeout值最小的
+                    if self._timeouts[0].callback is None: # 该timeout已经取消，直接pop掉
                         heapq.heappop(self._timeouts)
-                    elif self._timeouts[0].deadline <= now:
+                    elif self._timeouts[0].deadline <= now: # 该timeout已经到点，赶紧pop出来调用
                         timeout = heapq.heappop(self._timeouts)
                         self._run_callback(timeout.callback)
-                    else:
+                    else: # 还没有到点的timeout，则把epoll的等待时间阈值设为最近要到点的timeout还剩下的时间如果它比当前值更短的话
                         seconds = self._timeouts[0].deadline - now
                         poll_timeout = min(seconds, poll_timeout)
                         break
 
-            if self._callbacks:
-                # If any callbacks or timeouts called add_callback,
-                # we don't want to wait in poll() before we run them.
+            if self._callbacks: # 如果在处理callbacks和timeouts的时候又加入了新的callback，则epoll不等待，以免callback也一起等待
                 poll_timeout = 0.0
 
-            if not self._running:
+            if not self._running: # 检查运行标志。如果在处理callbacks和timeouts的时候调用了stop方法，则退出循环
                 break
 
             if self._blocking_signal_threshold is not None:
-                # clear alarm so it doesn't fire while poll is waiting for
-                # events.
-                signal.setitimer(signal.ITIMER_REAL, 0, 0)
+                signal.setitimer(signal.ITIMER_REAL, 0, 0) # 清空闹钟，使它在epoll在等待时不要发送
 
             try:
-                event_pairs = self._impl.poll(poll_timeout)
+                event_pairs = self._impl.poll(poll_timeout) # 等待IO事件
             except Exception, e:
-                # Depending on python version and IOLoop implementation,
-                # different exception types may be thrown and there are
-                # two ways EINTR might be signaled:
-                # * e.errno == errno.EINTR
-                # * e.args is like (errno.EINTR, 'Interrupted system call')
                 if (getattr(e, 'errno', None) == errno.EINTR or
-                    (isinstance(getattr(e, 'args', None), tuple) and
-                     len(e.args) == 2 and e.args[0] == errno.EINTR)):
+                    (isinstance(getattr(e, 'args', None), tuple) and len(e.args) == 2 and e.args[0] == errno.EINTR)):
+                    # epoll的poll操作等待超时，或者被信号处理函数打断，需要手动重启
                     continue
-                else:
+                else: # 其他异常不做处理，直接抛出
                     raise
 
-            if self._blocking_signal_threshold is not None:
-                signal.setitimer(signal.ITIMER_REAL,
-                                 self._blocking_signal_threshold, 0)
+            if self._blocking_signal_threshold is not None: # 恢复闹钟
+                signal.setitimer(signal.ITIMER_REAL, self._blocking_signal_threshold, 0)
 
-            # Pop one fd at a time from the set of pending fds and run
-            # its handler. Since that handler may perform actions on
-            # other file descriptors, there may be reentrant calls to
-            # this IOLoop that update self._events
-            self._events.update(event_pairs)
+            self._events.update(event_pairs) # 将等待到的IO事件加入到_events中去
+
+            # Since that handler may perform actions on other file descriptors,
+            # there may be reentrant calls to this IOLoop that update self._events
+            # 每次从_events中pop出一个fd，然后运行它对应的handler。
             while self._events:
                 fd, events = self._events.popitem()
                 try:
                     self._handlers[fd](fd, events)
                 except (OSError, IOError), e:
-                    if e.args[0] == errno.EPIPE:
-                        # Happens when the client closes the connection
+                    if e.args[0] == errno.EPIPE: # Happens when the client closes the connection
                         pass
                     else:
-                        logging.error("Exception in I/O handler for fd %s",
-                                      fd, exc_info=True)
+                        logging.error("Exception in I/O handler for fd %s", fd, exc_info=True)
                 except Exception:
-                    logging.error("Exception in I/O handler for fd %s",
-                                  fd, exc_info=True)
-        # reset the stopped flag so another start/stop pair can be issued
+                    logging.error("Exception in I/O handler for fd %s", fd, exc_info=True)
+
+        # 退出循环后重置stopped标志，使其可以重新开始
         self._stopped = False
-        if self._blocking_signal_threshold is not None:
+        if self._blocking_signal_threshold is not None: # 清除闹钟
             signal.setitimer(signal.ITIMER_REAL, 0, 0)
 
     def stop(self):
-        """Stop the loop after the current event loop iteration is complete.
-        If the event loop is not currently running, the next call to start()
-        will return immediately.
-
-        To use asynchronous methods from otherwise-synchronous code (such as
-        unit tests), you can start and stop the event loop like this::
-
-          ioloop = IOLoop()
-          async_method(ioloop=ioloop, callback=ioloop.stop)
-          ioloop.start()
-
-        ioloop.start() will return after async_method has run its callback,
-        whether that callback was invoked before or after ioloop.start.
-
-        Note that even after `stop` has been called, the IOLoop is not
-        completely stopped until `IOLoop.start` has also returned.
-        """
-        self._running = False
-        self._stopped = True
-        self._waker.wake()
+        """ 在下一轮IO循环中停止循环。
+        如果循环当前没有运行，则下一次调用start()会马上返回。 """
+        self._running = False # 设置运行标志 
+        self._stopped = True # 使start()马上返回
+        self._waker.wake() # 防止循环一直在等待中，不能马上退出
 
     def running(self):
-        """Returns true if this IOLoop is currently running."""
+        """ 返回当前IOLoop是否正在运行。 """
         return self._running
 
     def add_timeout(self, deadline, callback):
-        """Calls the given callback at the time deadline from the I/O loop.
-
-        Returns a handle that may be passed to remove_timeout to cancel.
-
-        ``deadline`` may be a number denoting a unix timestamp (as returned
-        by ``time.time()`` or a ``datetime.timedelta`` object for a deadline
-        relative to the current time.
-
-        Note that it is not safe to call `add_timeout` from other threads.
-        Instead, you must use `add_callback` to transfer control to the
-        IOLoop's thread, and then call `add_timeout` from there.
-        """
-        timeout = _Timeout(deadline, stack_context.wrap(callback))
-        heapq.heappush(self._timeouts, timeout)
+        """ 在IOLoop中，当deadline到点时调用callback。返回一个可用于取消的句柄。
+        在其他线程调用该方法不安全，应该在IOLoop线程中添加（利用add_callback方法）。 """
+        timeout = _Timeout(deadline, stack_context.wrap(callback)) # _Timeout对象
+        heapq.heappush(self._timeouts, timeout) # _timeouts是个堆
         return timeout
 
     def remove_timeout(self, timeout):
-        """Cancels a pending timeout.
-
-        The argument is a handle as returned by add_timeout.
-        """
-        # Removing from a heap is complicated, so just leave the defunct
-        # timeout object in the queue (see discussion in
-        # http://docs.python.org/library/heapq.html).
-        # If this turns out to be a problem, we could add a garbage
-        # collection pass whenever there are too many dead timeouts.
-        timeout.callback = None
+        """ 取消一个pending的timeout。 """
+        timeout.callback = None # _timeouts是个堆，这里只简单地把callback设置为None，具体的移除还是在IOLoop中
 
     def add_callback(self, callback):
-        """Calls the given callback on the next I/O loop iteration.
-
-        It is safe to call this method from any thread at any time.
-        Note that this is the *only* method in IOLoop that makes this
-        guarantee; all other interaction with the IOLoop must be done
-        from that IOLoop's thread.  add_callback() may be used to transfer
-        control from other threads to the IOLoop's thread.
-        """
+        """ 在下一轮IOLoop中调用给定的callback。
+        这是唯一一个在任何时间、任何线程都能安全调用的方法。其他的操作都应该使用该方法加入到IOLoop中。 """
         with self._callback_lock:
             list_empty = not self._callbacks
             self._callbacks.append(stack_context.wrap(callback))
         if list_empty and thread.get_ident() != self._thread_ident:
-            # If we're in the IOLoop's thread, we know it's not currently
-            # polling.  If we're not, and we added the first callback to an
-            # empty list, we may need to wake it up (it may wake up on its
-            # own, but an occasional extra wake is harmless).  Waking
-            # up a polling IOLoop is relatively expensive, so we try to
-            # avoid it when we can.
+            # 如果是在非IOLoop线程中加入callback到了一个空_callbacks集合中，则试图唤醒IOLoop
             self._waker.wake()
 
     def _run_callback(self, callback):
         try:
-            callback()
+            callback() # 直接调用callback
         except Exception:
             self.handle_callback_exception(callback)
 
     def handle_callback_exception(self, callback):
-        """This method is called whenever a callback run by the IOLoop
-        throws an exception.
-
-        By default simply logs the exception as an error.  Subclasses
-        may override this method to customize reporting of exceptions.
-
-        The exception itself is not passed explicitly, but is available
-        in sys.exc_info.
-        """
+        """ 当IOLoop运行callback抛异常时，该方法被调用。
+        默认只是log一下异常栈，子类可重载实现。异常对象可由sys.exc_info得到。 """
         logging.error("Exception in callback %r", callback, exc_info=True)
 
 

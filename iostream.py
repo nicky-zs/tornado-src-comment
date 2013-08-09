@@ -81,8 +81,8 @@ class IOStream(object):
         self._try_inline_read()
 
     def read_bytes(self, num_bytes, callback, streaming_callback=None):
-        """ 读取固定的字符数。 """
-        """ 如果streaming_callback不为空，则它将处理所有的数据，callback得到的参数将为空。 """
+        """ 读取固定的字符数。
+        如果streaming_callback不为空，则它将处理所有的数据，callback得到的参数将为空。 """
         self._set_read_callback(callback)
         assert isinstance(num_bytes, (int, long))
         self._read_bytes = num_bytes # 设置要读取的字符数，否则为None
@@ -90,8 +90,8 @@ class IOStream(object):
         self._try_inline_read()
 
     def read_until_close(self, callback, streaming_callback=None):
-        """ 读取直到关闭。 """
-        """ 如果streaming_callback不为空，则它将处理所有的数据，callback得到的参数将为空。 """
+        """ 读取直到关闭。
+        如果streaming_callback不为空，则它将处理所有的数据，callback得到的参数将为空。 """
         self._set_read_callback(callback)
         self._streaming_callback = stack_context.wrap(streaming_callback)
         if self.closed(): # 如果已经关闭则一次性消费完整个_read_buffer然后返回
@@ -255,8 +255,8 @@ class IOStream(object):
         self._read_callback = stack_context.wrap(callback)
 
     def _try_inline_read(self):
-        """ 尝试从缓冲区中完成当前的读操作。用于用户主动的读操作。 """
-        """ 如果读操作可以在未阻塞的情况下完成，则在下一次ioloop中调用读回调；否则在socket上开始监听读。 """
+        """ 尝试从缓冲区中完成当前的读操作。用于用户主动的读操作。
+        如果读操作可以在未阻塞的情况下完成，则在下一次ioloop中调用读回调；否则在socket上开始监听读。 """
         # 第一步：尝试调用_read_from_buffer完成读操作。如果返回了True则认为操作成功。
         if self._read_from_buffer():
             return
@@ -277,9 +277,9 @@ class IOStream(object):
         self._maybe_add_error_listener()
 
     def _read_from_socket(self):
-        """ 从socket中读取数据，并返回读到的字符串。这是真正读网络数据的方法。 """
-        """ 如果无数据可读则返回None。如果是网络另一端关闭了连接则这边也关闭。 """
-        """ 只有下面的_read_to_buffer方法会调用该方法。 """
+        """ 从socket中读取数据，并返回读到的字符串。这是真正读网络数据的方法。
+        如果无数据可读则返回None。如果是网络另一端关闭了连接则这边也关闭。
+        只有下面的_read_to_buffer方法会调用该方法。 """
         try:
             chunk = self.socket.recv(self.read_chunk_size) # 从socket中读取字符串
         except socket.error, e:
@@ -311,9 +311,9 @@ class IOStream(object):
         return len(chunk)
 
     def _read_from_buffer(self):
-        """ 试着从buffer中完成当前的读操作。该方法会调用当前的所有callback以完成读操作。 """
-        """ 如果读操作顺利完成则返回True。 只会在_handle_read和_try_inline_read中被调用。 """
-        """ 如果没有任何注册的读回调，则该方法会直接返回False。另外，如果_read_buffer内容不够也会返回False。 """
+        """ 试着从buffer中完成当前的读操作。该方法会调用当前的所有callback以完成读操作。
+        如果读操作顺利完成则返回True。 只会在_handle_read和_try_inline_read中被调用。
+        如果没有任何注册的读回调，则该方法会直接返回False。另外，如果_read_buffer内容不够也会返回False。 """
         if self._streaming_callback is not None and self._read_buffer_size:
             # 如果设置了_streaming_callback则所有的读取块都要交给_streaming_callback处理一遍
             # 如果不是要求读取固定字节数，则把整个_read_buffer都处理了，之后_read_buffer为空;
