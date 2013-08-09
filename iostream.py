@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 # vim: fileencoding=utf-8
-#
-# Reading the fucking source code.
 
 from __future__ import absolute_import, division, with_statement
 
