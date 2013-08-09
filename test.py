@@ -33,6 +33,7 @@ class Client(object):
     def send_request(self):
         self.stream.write('GET %s HTTP/1.1\r\nHost: %s\r\n\r\n'
                 % (self.uri, self.domain))
+        return
         #self.stream.read_until_close(self.on_close, self.on_chunk_read)
         self.stream.read_bytes(4096, self.on_bytes_read)
 

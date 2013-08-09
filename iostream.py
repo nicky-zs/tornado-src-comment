@@ -108,31 +108,22 @@ class IOStream(object):
         self._add_io_state(self.io_loop.READ)
 
     def write(self, data, callback=None):
-        """Write the given data to this stream.
-
-        If callback is given, we call it when all of the buffered write
-        data has been successfully written to the stream. If there was
-        previously buffered write data and an old write callback, that
-        callback is simply overwritten with this new callback.
-        """
+        """ 将给定的data写到流中。callback会在所有的写缓冲都写入到流之后被调用。"""
         assert isinstance(data, bytes_type)
         self._check_closed()
-        # We use bool(_write_buffer) as a proxy for write_buffer_size>0,
-        # so never put empty strings in the buffer.
+        # 不要把''放进来，会被当成无数据
         if data:
-            # Break up large contiguous strings before inserting them in the
-            # write buffer, so we don't have to recopy the entire thing
-            # as we slice off pieces to send to the socket.
             WRITE_BUFFER_CHUNK_SIZE = 128 * 1024
+            # 把超过大小的字符串打散后再追加到_write_buffer中
             if len(data) > WRITE_BUFFER_CHUNK_SIZE:
                 for i in range(0, len(data), WRITE_BUFFER_CHUNK_SIZE):
                     self._write_buffer.append(data[i:i + WRITE_BUFFER_CHUNK_SIZE])
             else:
                 self._write_buffer.append(data)
         self._write_callback = stack_context.wrap(callback)
-        if not self._connecting:
+        if not self._connecting: # 如果是正在连接中就先别写
             self._handle_write()
-            if self._write_buffer:
+            if self._write_buffer: # 没有写完，注册个可写通知下次再写
                 self._add_io_state(self.io_loop.WRITE)
             self._maybe_add_error_listener()
 
@@ -239,7 +230,8 @@ class IOStream(object):
             self._pending_callbacks += 1
             self.io_loop.add_callback(wrapper)
 
-    def _handle_read(self): # 在io_loop的迭代中处理读事件
+    def _handle_read(self):
+        """ 在io_loop的迭代中处理读事件，由io_loop上的handler自动调用。 """
         try:
             try:
                 # 假装有一个pending，防止_read_to_buffer直接把连接关了。
@@ -265,7 +257,7 @@ class IOStream(object):
         self._read_callback = stack_context.wrap(callback)
 
     def _try_inline_read(self):
-        """ 尝试从缓冲区中完成当前的读操作。 """
+        """ 尝试从缓冲区中完成当前的读操作。用于用户主动的读操作。 """
         """ 如果读操作可以在未阻塞的情况下完成，则在下一次ioloop中调用读回调；否则在socket上开始监听读。 """
         # 第一步：尝试调用_read_from_buffer完成读操作。如果返回了True则认为操作成功。
         if self._read_from_buffer():
@@ -322,7 +314,8 @@ class IOStream(object):
 
     def _read_from_buffer(self):
         """ 试着从buffer中完成当前的读操作。该方法会调用当前的所有callback以完成读操作。 """
-        """ 如果读操作顺利完成则返回True，如果buffer不够用则返回False。 只会在_handle_read和_try_inline_read中被调用。 """
+        """ 如果读操作顺利完成则返回True。 只会在_handle_read和_try_inline_read中被调用。 """
+        """ 如果没有任何注册的读回调，则该方法会直接返回False。另外，如果_read_buffer内容不够也会返回False。 """
         if self._streaming_callback is not None and self._read_buffer_size:
             # 如果设置了_streaming_callback则所有的读取块都要交给_streaming_callback处理一遍
             # 如果不是要求读取固定字节数，则把整个_read_buffer都处理了，之后_read_buffer为空;
@@ -397,37 +390,28 @@ class IOStream(object):
         while self._write_buffer:
             try:
                 if not self._write_buffer_frozen:
-                    # On windows, socket.send blows up if given a
-                    # write buffer that's too large, instead of just
-                    # returning the number of bytes it was able to
-                    # process.  Therefore we must not call socket.send
-                    # with more than 128KB at a time.
+                    # On windows, socket.send blows up if given a write buffer that's too large, instead of just returning the number
+                    # of bytes it was able to process.  Therefore we must not call socket.send with more than 128KB at a time.
                     _merge_prefix(self._write_buffer, 128 * 1024)
-                num_bytes = self.socket.send(self._write_buffer[0])
-                if num_bytes == 0:
-                    # With OpenSSL, if we couldn't write the entire buffer,
-                    # the very same string object must be used on the
-                    # next call to send.  Therefore we suppress
-                    # merging the write buffer after an incomplete send.
-                    # A cleaner solution would be to set
-                    # SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER, but this is
-                    # not yet accessible from python
-                    # (http://bugs.python.org/issue8240)
+                num_bytes = self.socket.send(self._write_buffer[0]) # 每次先试图发送_write_buffer的第一个chunk
+                if num_bytes == 0: # 若一个字都没发出去，则下次保持原样重发
+                    # With OpenSSL, if we couldn't write the entire buffer, the very same string object must be used on the next call
+                    # to send. Therefore we suppress merging the write buffer after an incomplete send. A cleaner solution would be to set
+                    # SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER, but this is not yet accessible from python (http://bugs.python.org/issue8240)
                     self._write_buffer_frozen = True
                     break
                 self._write_buffer_frozen = False
-                _merge_prefix(self._write_buffer, num_bytes)
+                _merge_prefix(self._write_buffer, num_bytes) # 这里只能把已经写到网络中的数据给pop掉
                 self._write_buffer.popleft()
             except socket.error, e:
                 if e.args[0] in (errno.EWOULDBLOCK, errno.EAGAIN):
                     self._write_buffer_frozen = True
                     break
-                else:
-                    logging.warning("Write error on %d: %s",
-                                    self.socket.fileno(), e)
+                else: # 真的错误
+                    logging.warning("Write error on %d: %s", self.socket.fileno(), e)
                     self.close()
                     return
-        if not self._write_buffer and self._write_callback:
+        if not self._write_buffer and self._write_callback: # 如果循环退出时数据已经发送完了，则调用_write_callback
             callback = self._write_callback
             self._write_callback = None
             self._run_callback(callback)
