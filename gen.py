@@ -19,8 +19,7 @@ class BadYieldError(Exception)       : pass
 def engine(func):
     """ 使用生成器写异步callback代码的函数的装饰器。
     所有yield本模块的对象（Task等）的生成器都要使用此装饰器。此装饰器只能应用于异步的代码，比如异步的get/post。
-    （为了正确的异常处理，tornado.gen.engine装饰器要离生成器更近一些。）
-    在多数情况下，对那些没有callback参数的函数使用此装饰器是没有意义的。 """
+    （为正确的异常处理，tornado.gen.engine装饰器要离生成器最近。）多数情况下，对那些没有callback参数的函数使用此装饰器是没有意义的。 """
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         runner = None # 生成器的执行依赖于一个Runner。每一个engine在被调用的时候都会转换成一个Runner然后去执行。
@@ -61,16 +60,11 @@ class YieldPoint(object):
 
 
 class Callback(YieldPoint):
-    """Returns a callable object that will allow a matching `Wait` to proceed.
-
-    The key may be any value suitable for use as a dictionary key, and is
-    used to match ``Callbacks`` to their corresponding ``Waits``.  The key
-    must be unique among outstanding callbacks within a single run of the
-    generator function, but may be reused across different runs of the same
-    function (so constants generally work fine).
-
-    The callback may be called with zero or one arguments; if an argument
-    is given it will be returned by `Wait`.
+    """ Returns a callable object that will allow a matching `Wait` to proceed.
+    The key may be any value suitable for use as a dictionary key, and is used to match ``Callbacks`` to their corresponding ``Waits``.
+    The key must be unique among outstanding callbacks within a single run of the generator function,
+    but may be reused across different runs of the same function (so constants generally work fine).
+    The callback may be called with zero or one arguments; if an argument is given it will be returned by `Wait`.
     """
     def __init__(self, key):
         self.key = key
@@ -103,10 +97,7 @@ class Wait(YieldPoint):
 
 class WaitAll(YieldPoint):
     """Returns the results of multiple previous `Callbacks`.
-
-    The argument is a sequence of `Callback` keys, and the result is
-    a list of results in the same order.
-
+    The argument is a sequence of `Callback` keys, and the result is a list of results in the same order.
     `WaitAll` is equivalent to yielding a list of `Wait` objects.
     """
     def __init__(self, keys):
@@ -146,17 +137,12 @@ class Task(YieldPoint):
         return self.runner.pop_result(self.key)
 
 
-class Multi(YieldPoint):
-    """Runs multiple asynchronous operations in parallel.
-
-    Takes a list of ``Tasks`` or other ``YieldPoints`` and returns a list of
-    their responses.  It is not necessary to call `Multi` explicitly,
-    since the engine will do so automatically when the generator yields
-    a list of ``YieldPoints``.
-    """
+class Multi(YieldPoint): # (组合模式)
+    """ 并发运行多个异步操作。以Task或者其他YieldPoint对象的列表作为参数并返回相应的结果的列表。
+    不用显示地调用Multi类，因为engine会自动将yield的list自动转换为Multi。 """
     def __init__(self, children):
         assert all(isinstance(i, YieldPoint) for i in children)
-        self.children = children
+        self.children = children # 所有的接口操作直接下派到每一个具体的YieldPoint上
 
     def start(self, runner):
         for i in self.children:
