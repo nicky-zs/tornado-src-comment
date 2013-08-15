@@ -1,57 +1,16 @@
 #!/usr/bin/env python
 # vim: fileencoding=utf-8
 
-'''StackContext allows applications to maintain threadlocal-like state
-that follows execution as it moves to other execution contexts.
-
-The motivating examples are to eliminate the need for explicit
-async_callback wrappers (as in tornado.web.RequestHandler), and to
-allow some additional context to be kept for logging.
-
-This is slightly magic, but it's an extension of the idea that an exception
-handler is a kind of stack-local state and when that stack is suspended
-and resumed in a new context that state needs to be preserved.  StackContext
-shifts the burden of restoring that state from each call site (e.g.
-wrapping each AsyncHTTPClient callback in async_callback) to the mechanisms
-that transfer control from one context to another (e.g. AsyncHTTPClient
-itself, IOLoop, thread pools, etc).
-
-Example usage::
-
-    @contextlib.contextmanager
-    def die_on_error():
-        try:
-            yield
-        except Exception:
-            logging.error("exception in asynchronous operation",exc_info=True)
-            sys.exit(1)
-
-    with StackContext(die_on_error):
-        # Any exception thrown here *or in callback and its desendents*
-        # will cause the process to exit instead of spinning endlessly
-        # in the ioloop.
-        http_client.fetch(url, callback)
-    ioloop.start()
-
-Most applications shouln't have to work with `StackContext` directly.
-Here are a few rules of thumb for when it's necessary:
-
-* If you're writing an asynchronous library that doesn't rely on a
-  stack_context-aware library like `tornado.ioloop` or `tornado.iostream`
-  (for example, if you're writing a thread pool), use
-  `stack_context.wrap()` before any asynchronous operations to capture the
-  stack context from where the operation was started.
-
-* If you're writing an asynchronous library that has some shared
-  resources (such as a connection pool), create those shared resources
-  within a ``with stack_context.NullContext():`` block.  This will prevent
-  ``StackContexts`` from leaking from one request to another.
-
-* If you want to write something like an exception handler that will
-  persist across asynchronous calls, create a new `StackContext` (or
-  `ExceptionStackContext`), and make your asynchronous calls in a ``with``
-  block that references your `StackContext`.
-'''
+""" StackContext允许程序维护类threadlocal的状态，可以随着执行上下文一起转移。
+大多数程序都不用直接操作StackContext。有必要的情况有：
+* If you're writing an asynchronous library that doesn't rely on a stack_context-aware library like `tornado.ioloop`
+  or `tornado.iostream` (for example, if you're writing a thread pool), use `stack_context.wrap()` before any asynchronous
+  operations to capture the stack context from where the operation was started.
+* If you're writing an asynchronous library that has some shared resources (such as a connection pool), create those shared resources
+  within a ``with stack_context.NullContext():`` block.  This will prevent ``StackContexts`` from leaking from one request to another.
+* If you want to write something like an exception handler that will persist across asynchronous calls, create a new `StackContext` (or
+  `ExceptionStackContext`), and make your asynchronous calls in a ``with`` block that references your `StackContext`.
+"""
 
 from __future__ import absolute_import, division, with_statement
 
@@ -72,44 +31,33 @@ _state = _State()
 
 
 class StackContext(object):
-    '''Establishes the given context as a StackContext that will be transferred.
-
-    Note that the parameter is a callable that returns a context
-    manager, not the context itself.  That is, where for a
-    non-transferable context manager you would say::
-
+    """ 把给定的上下文建立成一个StackContext对象以用于转移。
+    注意，参数是一个callable，它返回一个contextmanager，而不是上下文本身。即对于一个不可转移的contextmanager：
       with my_context():
-
-    StackContext takes the function itself rather than its result::
-
+    StackContext以该函数本身作为参数，而不是结果：
       with StackContext(my_context):
 
-    The result of ``with StackContext() as cb:`` is a deactivation
-    callback.  Run this callback when the StackContext is no longer
-    needed to ensure that it is not propagated any further (note that
-    deactivating a context does not affect any instances of that
-    context that are currently pending).  This is an advanced feature
-    and not necessary in most applications.
-    '''
+    The result of ``with StackContext() as cb:`` is a deactivation callback.
+    Run this callback when the StackContext is no longer needed to ensure that it is not propagated any further
+    (note that deactivating a context does not affect any instances of that context that are currently pending).
+    This is an advanced feature and not necessary in most applications. """ 
     def __init__(self, context_factory, _active_cell=None):
-        self.context_factory = context_factory
+        self.context_factory = context_factory # 调用该函数能得到一个contextmanager
         self.active_cell = _active_cell or [True]
 
-    # Note that some of this code is duplicated in ExceptionStackContext
-    # below.  ExceptionStackContext is more common and doesn't need
-    # the full generality of this class.
+    # Note that some of this code is duplicated in ExceptionStackContext below.
+    # ExceptionStackContext is more common and doesn't need the full generality of this class.
     def __enter__(self):
-        self.old_contexts = _state.contexts
-        # _state.contexts is a tuple of (class, arg, active_cell) tuples
-        _state.contexts = (self.old_contexts +
-                           ((StackContext, self.context_factory, self.active_cell),))
+        self.old_contexts = _state.contexts # _state.contexts是(class, arg, active_cell)三元组
+        # 进入StackContext时，self.old_contexts会保留旧的上下文，当前上下文会追加一个三元组
+        _state.contexts = (self.old_contexts + ((StackContext, self.context_factory, self.active_cell),))
         try:
             self.context = self.context_factory()
             self.context.__enter__()
         except Exception:
             _state.contexts = self.old_contexts
             raise
-        return lambda: operator.setitem(self.active_cell, 0, False)
+        return lambda: operator.setitem(self.active_cell, 0, False) # 该lambda表达式即deactivation
 
     def __exit__(self, type, value, traceback):
         try:
@@ -119,27 +67,18 @@ class StackContext(object):
 
 
 class ExceptionStackContext(object):
-    '''Specialization of StackContext for exception handling.
-
-    The supplied exception_handler function will be called in the
-    event of an uncaught exception in this context.  The semantics are
-    similar to a try/finally clause, and intended use cases are to log
-    an error, close a socket, or similar cleanup actions.  The
-    exc_info triple (type, value, traceback) will be passed to the
-    exception_handler function.
-
-    If the exception handler returns true, the exception will be
-    consumed and will not be propagated to other exception handlers.
-    '''
+    """ StackContext用于异常处理的子类。
+    提供的异常处理函数会在context中捕获到异常时被调用，语义类似try/finally，用于记录log，关闭socket等cleanup操作。
+    The exc_info triple (type, value, traceback) will be passed to the exception_handler function.
+    If the exception handler returns true, the exception will be consumed and will not be propagated to other exception handlers.
+    """ 
     def __init__(self, exception_handler, _active_cell=None):
         self.exception_handler = exception_handler
         self.active_cell = _active_cell or [True]
 
     def __enter__(self):
         self.old_contexts = _state.contexts
-        _state.contexts = (self.old_contexts +
-                           ((ExceptionStackContext, self.exception_handler,
-                             self.active_cell),))
+        _state.contexts = (self.old_contexts + ((ExceptionStackContext, self.exception_handler, self.active_cell), ))
         return lambda: operator.setitem(self.active_cell, 0, False)
 
     def __exit__(self, type, value, traceback):
@@ -152,12 +91,11 @@ class ExceptionStackContext(object):
 
 
 class NullContext(object):
-    '''Resets the StackContext.
+    """ Resets the StackContext.
 
     Useful when creating a shared resource on demand (e.g. an AsyncHTTPClient)
-    where the stack that caused the creating is not relevant to future
-    operations.
-    '''
+    where the stack that caused the creating is not relevant to future operations.
+    """
     def __enter__(self):
         self.old_contexts = _state.contexts
         _state.contexts = ()
@@ -171,46 +109,28 @@ class _StackContextWrapper(functools.partial):
 
 
 def wrap(fn):
-    '''Returns a callable object that will restore the current StackContext
-    when executed.
-
-    Use this whenever saving a callback to be executed later in a
-    different execution context (either in a different thread or
-    asynchronously in the same thread).
-    '''
+    """ 返回一个可调用的对象，该对象在执行后会恢复当前的StackContext。
+    当保存一个回调以便稍后在不同的上下文中执行时，使用该修饰器。 """
     if fn is None or fn.__class__ is _StackContextWrapper:
         return fn
-    # functools.wraps doesn't appear to work on functools.partial objects
-    #@functools.wraps(fn)
 
+    #@functools.wraps(fn) # functools.wraps不能在functools.partial对象上工作
     def wrapped(*args, **kwargs):
+        # callback和contexts是由_StackContextWrapper即functools.partial带入的包装fn时的环境，分别对应着回调函数和当前的上下文
         callback, contexts, args = args[0], args[1], args[2:]
-
-        if contexts is _state.contexts or not contexts:
+        if contexts is _state.contexts or not contexts: # contexts就是当前的，或者根本就没有，那么就直接调用callback返回
             callback(*args, **kwargs)
             return
-        if not _state.contexts:
-            new_contexts = [cls(arg, active_cell)
-                            for (cls, arg, active_cell) in contexts
-                            if active_cell[0]]
-        # If we're moving down the stack, _state.contexts is a prefix
-        # of contexts.  For each element of contexts not in that prefix,
-        # create a new StackContext object.
-        # If we're moving up the stack (or to an entirely different stack),
-        # _state.contexts will have elements not in contexts.  Use
-        # NullContext to clear the state and then recreate from contexts.
-        elif (len(_state.contexts) > len(contexts) or
-            any(a[1] is not b[1]
-                for a, b in itertools.izip(_state.contexts, contexts))):
-            # contexts have been removed or changed, so start over
-            new_contexts = ([NullContext()] +
-                            [cls(arg, active_cell)
-                             for (cls, arg, active_cell) in contexts
-                             if active_cell[0]])
+        if not _state.contexts: # 初始？
+            new_contexts = [cls(arg, active_cell) for (cls, arg, active_cell) in contexts if active_cell[0]]
+        elif (len(_state.contexts) > len(contexts) or any(a[1] is not b[1] for a, b in itertools.izip(_state.contexts, contexts))):
+            # 沿栈向上，或转到完全不同的栈中，则_state.contexts有不在contexts中的元素。使用NullContext清空状态然后重新从contexts创建
+            new_contexts = [NullContext()] + [cls(arg, active_cell) for (cls, arg, active_cell) in contexts if active_cell[0]]
         else:
-            new_contexts = [cls(arg, active_cell)
-                            for (cls, arg, active_cell) in contexts[len(_state.contexts):]
-                            if active_cell[0]]
+            # 沿栈向下，_state.contexts会是contexts的前缀。对于contexts中每一个不在该前缀中的元素，生成一个新的StackContext对象
+            new_contexts = [cls(arg, active_cell) for (cls, arg, active_cell) in contexts[len(_state.contexts):] if active_cell[0]]
+
+        # 如果new_contexts列表不为空，则在new_contexts上下文环境中调用callback
         if len(new_contexts) > 1:
             with _nested(*new_contexts):
                 callback(*args, **kwargs)
@@ -219,6 +139,7 @@ def wrap(fn):
                 callback(*args, **kwargs)
         else:
             callback(*args, **kwargs)
+
     if _state.contexts:
         return _StackContextWrapper(wrapped, fn, _state.contexts)
     else:
@@ -227,13 +148,9 @@ def wrap(fn):
 
 @contextlib.contextmanager
 def _nested(*managers):
-    """Support multiple context managers in a single with-statement.
-
-    Copied from the python 2.6 standard library.  It's no longer present
-    in python 3 because the with statement natively supports multiple
-    context managers, but that doesn't help if the list of context
-    managers is not known until runtime.
-    """
+    """ 支持将多个contextmanager放到单个with语句中。
+    Copied from the python 2.6 standard library. It's no longer present in python 3 because the with statement natively supports multiple
+    context managers, but that doesn't help if the list of context managers is not known until runtime. """
     exits = []
     vars = []
     exc = (None, None, None)
@@ -241,9 +158,9 @@ def _nested(*managers):
         for mgr in managers:
             exit = mgr.__exit__
             enter = mgr.__enter__
-            vars.append(enter())
+            vars.append(enter()) # 依次对所有的manager调用__enter__并把结果放入vars中
             exits.append(exit)
-        yield vars
+        yield vars # 一次性把整个vars yield出去
     except:
         exc = sys.exc_info()
     finally:
@@ -255,7 +172,5 @@ def _nested(*managers):
             except:
                 exc = sys.exc_info()
         if exc != (None, None, None):
-            # Don't rely on sys.exc_info() still containing
-            # the right information. Another exception may
-            # have been raised and caught by an exit method
-            raise_exc_info(exc)
+            raise_exc_info(exc) # 不要信任sys.exc_info()依然包含正确的信息，其他的异常可能已经在某个exit方法中捕获了
+
