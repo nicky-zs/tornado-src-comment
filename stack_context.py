@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # vim: fileencoding=utf-8
 
 """ StackContext允许程序维护类threadlocal的状态，可以随着执行上下文一起转移。
@@ -70,20 +69,20 @@ class ExceptionStackContext(object):
     """ StackContext用于异常处理的子类。
     提供的异常处理函数会在context中捕获到异常时被调用，语义类似try/finally，用于记录log，关闭socket等cleanup操作。
     The exc_info triple (type, value, traceback) will be passed to the exception_handler function.
-    If the exception handler returns true, the exception will be consumed and will not be propagated to other exception handlers.
-    """ 
+    If the exception handler returns true, the exception will be consumed and will not be propagated to other exception handlers. """ 
     def __init__(self, exception_handler, _active_cell=None):
         self.exception_handler = exception_handler
         self.active_cell = _active_cell or [True]
 
     def __enter__(self):
         self.old_contexts = _state.contexts
+        # 进入该context时，会在_state.contexts的基础上加入exception_handler的context
         _state.contexts = (self.old_contexts + ((ExceptionStackContext, self.exception_handler, self.active_cell), ))
-        return lambda: operator.setitem(self.active_cell, 0, False)
+        return lambda: operator.setitem(self.active_cell, 0, False) # 即deactivation对象
 
     def __exit__(self, type, value, traceback):
         try:
-            if type is not None:
+            if type is not None: # 如果在退出时有异常，则调用exception_handler来处理这异常
                 return self.exception_handler(type, value, traceback)
         finally:
             _state.contexts = self.old_contexts
@@ -91,14 +90,12 @@ class ExceptionStackContext(object):
 
 
 class NullContext(object):
-    """ Resets the StackContext.
-
+    """ 重置StackContext。
     Useful when creating a shared resource on demand (e.g. an AsyncHTTPClient)
-    where the stack that caused the creating is not relevant to future operations.
-    """
+    where the stack that caused the creating is not relevant to future operations. """
     def __enter__(self):
         self.old_contexts = _state.contexts
-        _state.contexts = ()
+        _state.contexts = () # 使callback运行时_state.contexts为空，从而完全从包装时的contexts来生成new_contexts
 
     def __exit__(self, type, value, traceback):
         _state.contexts = self.old_contexts
@@ -116,21 +113,21 @@ def wrap(fn):
 
     #@functools.wraps(fn) # functools.wraps不能在functools.partial对象上工作
     def wrapped(*args, **kwargs):
-        # callback和contexts是由_StackContextWrapper即functools.partial带入的包装fn时的环境，分别对应着回调函数和当前的上下文
+        # callback和contexts是由_StackContextWrapper即functools.partial带入的包装fn时的环境，分别对应着回调函数和wrap该函数时的上下文
         callback, contexts, args = args[0], args[1], args[2:]
         if contexts is _state.contexts or not contexts: # contexts就是当前的，或者根本就没有，那么就直接调用callback返回
             callback(*args, **kwargs)
             return
-        if not _state.contexts: # 初始？
+        if not _state.contexts:
             new_contexts = [cls(arg, active_cell) for (cls, arg, active_cell) in contexts if active_cell[0]]
         elif (len(_state.contexts) > len(contexts) or any(a[1] is not b[1] for a, b in itertools.izip(_state.contexts, contexts))):
             # 沿栈向上，或转到完全不同的栈中，则_state.contexts有不在contexts中的元素。使用NullContext清空状态然后重新从contexts创建
             new_contexts = [NullContext()] + [cls(arg, active_cell) for (cls, arg, active_cell) in contexts if active_cell[0]]
         else:
-            # 沿栈向下，_state.contexts会是contexts的前缀。对于contexts中每一个不在该前缀中的元素，生成一个新的StackContext对象
+            # 沿栈向下，_state.contexts会是contexts的前缀。对于contexts中每一个在该前缀中的元素，生成一个新的StackContext对象
             new_contexts = [cls(arg, active_cell) for (cls, arg, active_cell) in contexts[len(_state.contexts):] if active_cell[0]]
 
-        # 如果new_contexts列表不为空，则在new_contexts上下文环境中调用callback
+        # 如果new_contexts列表不为空，则在new_contexts上下文环境中调用callback。基本上new_contexts都是wrap回调函数时的上下文环境。
         if len(new_contexts) > 1:
             with _nested(*new_contexts):
                 callback(*args, **kwargs)
@@ -141,7 +138,7 @@ def wrap(fn):
             callback(*args, **kwargs)
 
     if _state.contexts:
-        return _StackContextWrapper(wrapped, fn, _state.contexts)
+        return _StackContextWrapper(wrapped, fn, _state.contexts) # 包装时带上的是调用wrap时当前的_state.contexts
     else:
         return _StackContextWrapper(fn)
 
