@@ -149,7 +149,7 @@ class IOLoop(object):
             # 将新的callback推迟到下一轮事件循环中调用，以防止IO事件饥饿
             with self._callback_lock:
                 callbacks = self._callbacks
-                self._callbacks = [] # 新的callback会加入到这个空的self._callbacks中
+                self._callbacks = []
             for callback in callbacks: # 只运行callbacks里的callback
                 self._run_callback(callback)
 

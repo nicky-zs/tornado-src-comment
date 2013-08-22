@@ -43,7 +43,7 @@ class IOStream(object):
         self._read_bytes = None # 读取固定的字符数
         self._read_until_close = False # 读取直到关闭
 
-        # callbacks
+        # 所有这些callback在设置时都使用stack_context.wrap包装了
         self._read_callback = None # 读回调
         self._streaming_callback = None # 流回调
         self._write_callback = None # 写回调

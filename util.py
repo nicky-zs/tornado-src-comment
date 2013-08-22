@@ -76,8 +76,7 @@ else:
 
 
 def raise_exc_info(exc_info):
-    """ Re-raise an exception (with original traceback) from an exc_info tuple.
-    The argument is a ``(type, value, traceback)`` tuple as returned by `sys.exc_info`. """
+    """ 把参数传入的exc_info的异常重新抛出（保持原始traceback）。参数exc_info即之前某次sys.exc_info()调用返回的tuple。 """
     # 2to3 isn't smart enough to convert three-argument raise statements correctly in some cases.
     if isinstance(exc_info[1], exc_info[0]):
         raise exc_info[1], None, exc_info[2]
