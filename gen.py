@@ -23,7 +23,7 @@ def engine(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         runner = None # 生成器的执行依赖于一个Runner。每一个engine在被调用的时候都会转换成一个Runner然后去执行。
-        def handle_exception(typ, value, tb):
+        def handle_exception(typ, value, tb): # 异常处理函数
             # if the function throws an exception before its first "yield" (or is not a generator at all), the Runner won't exist yet.
             # However, in that case we haven't reached anything asynchronous yet, so we can just let the exception propagate.
             if runner is not None:

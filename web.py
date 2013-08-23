@@ -962,11 +962,9 @@ class RequestHandler(object):
 
     def _stack_context_handle_exception(self, type, value, traceback):
         try:
-            # For historical reasons _handle_request_exception only takes
-            # the exception value instead of the full triple,
-            # so re-raise the exception to ensure that it's in
-            # sys.exc_info()
-            raise_exc_info((type, value, traceback))
+            # For historical reasons _handle_request_exception only takes the exception value instead of the full triple,
+            # so re-raise the exception to ensure that it's in sys.exc_info()
+            raise_exc_info((type, value, traceback)) # 直接把异常重新抛出，保证原traceback被放入sys.exc_info()中
         except Exception:
             self._handle_request_exception(value)
         return True
@@ -1014,7 +1012,7 @@ class RequestHandler(object):
         return self.request.method + " " + self.request.uri + \
             " (" + self.request.remote_ip + ")"
 
-    def _handle_request_exception(self, e):
+    def _handle_request_exception(self, e): # 异步方法的异常处理函数，这里sys.exc_info()中的信息都是保留的异步函数中的原来的信息
         if isinstance(e, HTTPError):
             if e.log_message:
                 format = "%d %s: " + e.log_message
@@ -1026,8 +1024,7 @@ class RequestHandler(object):
             else:
                 self.send_error(e.status_code, exc_info=sys.exc_info())
         else:
-            logging.error("Uncaught exception %s\n%r", self._request_summary(),
-                          self.request, exc_info=True)
+            logging.error("Uncaught exception %s\n%r", self._request_summary(), self.request, exc_info=True)
             self.send_error(500, exc_info=sys.exc_info())
 
     def _ui_module(self, name, module):
@@ -1056,29 +1053,12 @@ class RequestHandler(object):
 
 
 def asynchronous(method):
-    """Wrap request handler methods with this if they are asynchronous.
-
-    If this decorator is given, the response is not finished when the
-    method returns. It is up to the request handler to call self.finish()
-    to finish the HTTP request. Without this decorator, the request is
-    automatically finished when the get() or post() method returns. ::
-
-       class MyRequestHandler(web.RequestHandler):
-           @web.asynchronous
-           def get(self):
-              http = httpclient.AsyncHTTPClient()
-              http.fetch("http://friendfeed.com/", self._on_download)
-
-           def _on_download(self, response):
-              self.write("Downloaded!")
-              self.finish()
-
-    """
+    """ 把request handler的方法包装成异步的。用户需要手动调用self.finish()方法来完成请求处理。 """
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
-        if self.application._wsgi:
+        if self.application._wsgi: # 不支持WSGI
             raise Exception("@asynchronous is not supported for WSGI apps")
-        self._auto_finish = False
+        self._auto_finish = False # 手动finish
         with stack_context.ExceptionStackContext(self._stack_context_handle_exception):
             return method(self, *args, **kwargs)
     return wrapper
