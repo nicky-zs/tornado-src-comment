@@ -47,21 +47,14 @@ class HTTPClient(object):
 
 class AsyncHTTPClient(object):
     """ 非阻塞的HTTP客户端。
-    The constructor for this class is magic in several respects:  It actually
-    creates an instance of an implementation-specific subclass, and instances
-    are reused as a kind of pseudo-singleton (one per IOLoop).  The keyword
-    argument force_instance=True can be used to suppress this singleton
-    behavior.  Constructor arguments other than io_loop and force_instance
-    are deprecated.  The implementation subclass as well as arguments to
-    its constructor can be set with the static method configure()
-    """
-    _impl_class = None
+    它会根据指定的实现子类来创建一个实例，并且该实例会像单例一样被复用（每个IOLoop一个实例），除非使用force_instance=True。"""
+    _impl_class = None # 实现子类
     _impl_kwargs = None
 
     _DEFAULT_MAX_CLIENTS = 10
 
     @classmethod
-    def _async_clients(cls):
+    def _async_clients(cls): # 返回cls对象上的clients复用dict，若还没有则新建一个WeakKeyDictionary
         assert cls is not AsyncHTTPClient, "should only be called on subclasses"
         if not hasattr(cls, '_async_client_dict'):
             cls._async_client_dict = weakref.WeakKeyDictionary()
@@ -69,14 +62,14 @@ class AsyncHTTPClient(object):
 
     def __new__(cls, io_loop=None, max_clients=None, force_instance=False, **kwargs):
         io_loop = io_loop or IOLoop.instance()
-        if cls is AsyncHTTPClient:
+        if cls is AsyncHTTPClient: # 这里是AsyncHTTPClient类直接被构造
             if cls._impl_class is None:
                 from tornado.simple_httpclient import SimpleAsyncHTTPClient
                 AsyncHTTPClient._impl_class = SimpleAsyncHTTPClient # AsyncHTTPClient类默认使用SimpleAsyncHTTPClient实现
             impl = AsyncHTTPClient._impl_class
-        else: # AsyncHTTPClient的子类
+        else: # 这里是AsyncHTTPClient的子类被构造
             impl = cls
-        if io_loop in impl._async_clients() and not force_instance:
+        if io_loop in impl._async_clients() and not force_instance: # 如果已有实例则直接返回
             return impl._async_clients()[io_loop]
         else:
             instance = super(AsyncHTTPClient, cls).__new__(impl)
@@ -85,12 +78,11 @@ class AsyncHTTPClient(object):
                 args.update(cls._impl_kwargs)
             args.update(kwargs)
             if max_clients is not None:
-                # max_clients is special because it may be passed
-                # positionally instead of by keyword
+                # max_clients is special because it may be passed positionally instead of by keyword
                 args["max_clients"] = max_clients
             elif "max_clients" not in args:
                 args["max_clients"] = AsyncHTTPClient._DEFAULT_MAX_CLIENTS
-            instance.initialize(io_loop, **args)
+            instance.initialize(io_loop, **args) # 初始化函数
             if not force_instance:
                 impl._async_clients()[io_loop] = instance
             return instance

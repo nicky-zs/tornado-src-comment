@@ -38,25 +38,9 @@ _DEFAULT_CA_CERTS = os.path.dirname(__file__) + '/ca-certificates.crt'
 class SimpleAsyncHTTPClient(AsyncHTTPClient):
     """ 没有外部依赖的非阻塞HTTP客户端。 """
     def initialize(self, io_loop=None, max_clients=10, hostname_mapping=None, max_buffer_size=104857600):
-        """Creates a AsyncHTTPClient.
-
-        Only a single AsyncHTTPClient instance exists per IOLoop
-        in order to provide limitations on the number of pending connections.
-        force_instance=True may be used to suppress this behavior.
-
-        max_clients is the number of concurrent requests that can be
-        in progress.  Note that this arguments are only used when the
-        client is first created, and will be ignored when an existing
-        client is reused.
-
-        hostname_mapping is a dictionary mapping hostnames to IP addresses.
-        It can be used to make local DNS changes when modifying system-wide
-        settings like /etc/hosts is not possible or desirable (e.g. in
-        unittests).
-
-        max_buffer_size is the number of bytes that can be read by IOStream. It
-        defaults to 100mb.
-        """
+        """ 创建一个AsyncHTTPClient实例。
+        每个IOLoop上只存在单个AsyncHTTPClient实例，从而可以限制pending的连接的数量。force_instance=True可以禁止这项特性。
+        max_clients是进程中可以存在的并发请求数，只在client第一次被创建时有效，之后复用client时该参数会被忽略。 """
         self.io_loop = io_loop
         self.max_clients = max_clients
         self.queue = collections.deque()
@@ -67,17 +51,15 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
     def fetch(self, request, callback, **kwargs):
         if not isinstance(request, HTTPRequest):
             request = HTTPRequest(url=request, **kwargs)
-        # We're going to modify this (to add Host, Accept-Encoding, etc),
-        # so make sure we don't modify the caller's object.  This is also
-        # where normal dicts get converted to HTTPHeaders objects.
+        # We're going to modify this (to add Host, Accept-Encoding, etc), so make sure we don't modify the caller's object.
+        # This is also where normal dicts get converted to HTTPHeaders objects.
         request.headers = HTTPHeaders(request.headers)
         callback = stack_context.wrap(callback)
         self.queue.append((request, callback))
         self._process_queue()
         if self.queue:
-            logging.debug("max_clients limit reached, request queued. "
-                          "%d active, %d queued requests." % (
-                    len(self.active), len(self.queue)))
+            logging.debug("max_clients limit reached, request queued. %d active, %d queued requests."
+                    % (len(self.active), len(self.queue)))
 
     def _process_queue(self):
         with stack_context.NullContext():
@@ -85,10 +67,7 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
                 request, callback = self.queue.popleft()
                 key = object()
                 self.active[key] = (request, callback)
-                _HTTPConnection(self.io_loop, self, request,
-                                functools.partial(self._release_fetch, key),
-                                callback,
-                                self.max_buffer_size)
+                _HTTPConnection(self.io_loop, self, request, functools.partial(self._release_fetch, key), callback, self.max_buffer_size)
 
     def _release_fetch(self, key):
         del self.active[key]
@@ -98,8 +77,7 @@ class SimpleAsyncHTTPClient(AsyncHTTPClient):
 class _HTTPConnection(object):
     _SUPPORTED_METHODS = set(["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 
-    def __init__(self, io_loop, client, request, release_callback,
-                 final_callback, max_buffer_size):
+    def __init__(self, io_loop, client, request, release_callback, final_callback, max_buffer_size):
         self.start_time = time.time()
         self.io_loop = io_loop
         self.client = client
@@ -110,18 +88,14 @@ class _HTTPConnection(object):
         self.headers = None
         self.chunks = None
         self._decompressor = None
-        # Timeout handle returned by IOLoop.add_timeout
-        self._timeout = None
+        self._timeout = None # 由IOLoop.add_timeout返回的Timeout句柄
         with stack_context.StackContext(self.cleanup):
             parsed = urlparse.urlsplit(_unicode(self.request.url))
             if ssl is None and parsed.scheme == "https":
-                raise ValueError("HTTPS requires either python2.6+ or "
-                                 "curl_httpclient")
+                raise ValueError("HTTPS requires either python2.6+ or curl_httpclient")
             if parsed.scheme not in ("http", "https"):
-                raise ValueError("Unsupported url scheme: %s" %
-                                 self.request.url)
-            # urlsplit results have hostname and port results, but they
-            # didn't support ipv6 literals until python 2.7.
+                raise ValueError("Unsupported url scheme: %s" % self.request.url)
+            # urlsplit results have hostname and port results, but they didn't support ipv6 literals until python 2.7.
             netloc = parsed.netloc
             if "@" in netloc:
                 userpass, _, netloc = netloc.rpartition("@")
@@ -132,8 +106,7 @@ class _HTTPConnection(object):
             else:
                 host = netloc
                 port = 443 if parsed.scheme == "https" else 80
-            if re.match(r'^\[.*\]$', host):
-                # raw ipv6 addresses in urls are enclosed in brackets
+            if re.match(r'^\[.*\]$', host): # raw ipv6 addresses in urls are enclosed in brackets
                 host = host[1:-1]
             parsed_hostname = host  # save final parsed host for _on_connect
             if self.client.hostname_mapping is not None:
@@ -141,13 +114,10 @@ class _HTTPConnection(object):
 
             if request.allow_ipv6:
                 af = socket.AF_UNSPEC
-            else:
-                # We only try the first IP we get from getaddrinfo,
-                # so restrict to ipv4 by default.
+            else: # We only try the first IP we get from getaddrinfo, so restrict to ipv4 by default.
                 af = socket.AF_INET
 
-            addrinfo = socket.getaddrinfo(host, port, af, socket.SOCK_STREAM,
-                                          0, 0)
+            addrinfo = socket.getaddrinfo(host, port, af, socket.SOCK_STREAM, 0, 0)
             af, socktype, proto, canonname, sockaddr = addrinfo[0]
 
             if parsed.scheme == "https":
@@ -183,22 +153,14 @@ class _HTTPConnection(object):
                     ssl_options["ssl_version"] = ssl.PROTOCOL_SSLv3
 
                 self.stream = SSLIOStream(socket.socket(af, socktype, proto),
-                                          io_loop=self.io_loop,
-                                          ssl_options=ssl_options,
-                                          max_buffer_size=max_buffer_size)
+                                          io_loop=self.io_loop, ssl_options=ssl_options, max_buffer_size=max_buffer_size)
             else:
-                self.stream = IOStream(socket.socket(af, socktype, proto),
-                                       io_loop=self.io_loop,
-                                       max_buffer_size=max_buffer_size)
+                self.stream = IOStream(socket.socket(af, socktype, proto), io_loop=self.io_loop, max_buffer_size=max_buffer_size)
             timeout = min(request.connect_timeout, request.request_timeout)
             if timeout:
-                self._timeout = self.io_loop.add_timeout(
-                    self.start_time + timeout,
-                    stack_context.wrap(self._on_timeout))
+                self._timeout = self.io_loop.add_timeout(self.start_time+timeout, stack_context.wrap(self._on_timeout))
             self.stream.set_close_callback(self._on_close)
-            self.stream.connect(sockaddr,
-                                functools.partial(self._on_connect, parsed,
-                                                  parsed_hostname))
+            self.stream.connect(sockaddr, functools.partial(self._on_connect, parsed, parsed_hostname))
 
     def _on_timeout(self):
         self._timeout = None
@@ -210,9 +172,7 @@ class _HTTPConnection(object):
             self.io_loop.remove_timeout(self._timeout)
             self._timeout = None
         if self.request.request_timeout:
-            self._timeout = self.io_loop.add_timeout(
-                self.start_time + self.request.request_timeout,
-                stack_context.wrap(self._on_timeout))
+            self._timeout = self.io_loop.add_timeout(self.start_time+self.request.request_timeout, stack_context.wrap(self._on_timeout))
         if (self.request.validate_cert and
             isinstance(self.stream, SSLIOStream)):
             match_hostname(self.stream.socket.getpeercert(),
@@ -221,12 +181,9 @@ class _HTTPConnection(object):
                            # correctly parsed value calculated in
                            # __init__
                            parsed_hostname)
-        if (self.request.method not in self._SUPPORTED_METHODS and
-            not self.request.allow_nonstandard_methods):
+        if (self.request.method not in self._SUPPORTED_METHODS and not self.request.allow_nonstandard_methods):
             raise KeyError("unknown method %s" % self.request.method)
-        for key in ('network_interface',
-                    'proxy_host', 'proxy_port',
-                    'proxy_username', 'proxy_password'):
+        for key in ('network_interface', 'proxy_host', 'proxy_port', 'proxy_username', 'proxy_password'):
             if getattr(self.request, key, None):
                 raise NotImplementedError('%s not supported' % key)
         if "Connection" not in self.request.headers:
@@ -244,8 +201,7 @@ class _HTTPConnection(object):
             password = self.request.auth_password or ''
         if username is not None:
             auth = utf8(username) + b(":") + utf8(password)
-            self.request.headers["Authorization"] = (b("Basic ") +
-                                                     base64.b64encode(auth))
+            self.request.headers["Authorization"] = (b("Basic ") + base64.b64encode(auth))
         if self.request.user_agent:
             self.request.headers["User-Agent"] = self.request.user_agent
         if not self.request.allow_nonstandard_methods:
@@ -254,17 +210,14 @@ class _HTTPConnection(object):
             else:
                 assert self.request.body is None
         if self.request.body is not None:
-            self.request.headers["Content-Length"] = str(len(
-                    self.request.body))
+            self.request.headers["Content-Length"] = str(len(self.request.body))
         if (self.request.method == "POST" and
             "Content-Type" not in self.request.headers):
             self.request.headers["Content-Type"] = "application/x-www-form-urlencoded"
         if self.request.use_gzip:
             self.request.headers["Accept-Encoding"] = "gzip"
-        req_path = ((parsed.path or '/') +
-                (('?' + parsed.query) if parsed.query else ''))
-        request_lines = [utf8("%s %s HTTP/1.1" % (self.request.method,
-                                                  req_path))]
+        req_path = ((parsed.path or '/') + (('?' + parsed.query) if parsed.query else ''))
+        request_lines = [utf8("%s %s HTTP/1.1" % (self.request.method, req_path))]
         for k, v in self.request.headers.get_all():
             line = utf8(k) + b(": ") + utf8(v)
             if b('\n') in line:
