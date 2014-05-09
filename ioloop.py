@@ -27,44 +27,43 @@ class IOLoop(object):
 
     """ 水平触发的epoll(只考虑Linux)实现的IO Loop。 """
 
-    # epoll模块的常量
-    _EPOLLIN = 0x001
-    _EPOLLPRI = 0x002 # 未用到?
-    _EPOLLOUT = 0x004
-    _EPOLLERR = 0x008
-    _EPOLLHUP = 0x010
-    _EPOLLRDHUP = 0x2000 # 未用到?
-    _EPOLLONESHOT = (1 << 30) # 未用到?
-    _EPOLLET = (1 << 31) # 未用到?
+    ## epoll模块的常量：
+    _EPOLLIN = 0x001          # 普通数据可读事件
+    _EPOLLPRI = 0x002         # 带外数据可读事件(未用到)
+    _EPOLLOUT = 0x004         # 可写事件
+    _EPOLLERR = 0x008         # 错误事件(epoll总是关注此事件)
+    _EPOLLHUP = 0x010         # 异常挂断事件(epoll总是关注此事件)
+    _EPOLLRDHUP = 0x2000      # 对端挂断事件(未用到)
+    _EPOLLONESHOT = (1 << 30) # 设置one-shot模式(未用到)
+    _EPOLLET = (1 << 31)      # 设置边缘触发模式(未用到)
 
-    # IOLoop的事件映射
+    ## IOLoop的事件映射
     NONE = 0
-    READ = _EPOLLIN # 1
-    WRITE = _EPOLLOUT # 4
-    ERROR = _EPOLLERR | _EPOLLHUP # 24
+    READ = _EPOLLIN
+    WRITE = _EPOLLOUT
+    ERROR = _EPOLLERR | _EPOLLHUP
 
-    # 生成全局ioloop对象的锁
+    ## 保证ioloop的全局唯一单例
     _instance_lock = threading.Lock()
 
     def __init__(self, impl=None):
-        self._impl = impl or _poll() # self._impl默认是select.epoll()
-        if hasattr(self._impl, 'fileno'):
+        self._impl = impl or _poll()           # Linux下即epoll
+        if hasattr(self._impl, 'fileno'):      # 若支持，设置FD_CLOEXEC
             set_close_exec(self._impl.fileno())
 
-        self._callback_lock = threading.Lock() # 回调锁
+        self._callback_lock = threading.Lock() # 使self._callbacks可用于多线程
 
-        self._handlers = {} # 处理函数集合
-        self._events = {}
-        self._callbacks = [] # 回调函数集合
-        self._timeouts = [] # 基于时间的调度，_timeouts是个堆
+        self._handlers = {}      # epoll中每个fd的处理函数Map
+        self._events = {}        # epoll返回的待处理事件Map
+        self._callbacks = []     # 用户加入的回调函数列表
+        self._timeouts = []      # ioloop中基于时间的调度，是一个小根堆
 
-        self._running = False # 运行标志
-        self._stopped = False
-        self._thread_ident = None
+        self._running = False      # 标记ioloop已经调用了start，还未调用stop
+        self._stopped = False      # 标记ioloop循环已退出，或已调用了stop
+        self._thread_ident = None  # 标记ioloop所运行的线程，以支持多线程访问
         self._blocking_signal_threshold = None
 
-        # 创建一个管道，当我们想在ioloop空闲时唤醒它就通过管道发送假的数据
-        self._waker = Waker()
+        self._waker = Waker()    # 创建一个管道，用于在其他线程调用add_callback时唤醒epoll_wait
         self.add_handler(self._waker.fileno(), lambda fd, events: self._waker.consume(), self.READ)
 
     @staticmethod
@@ -87,22 +86,21 @@ class IOLoop(object):
         IOLoop._instance = self
 
     def close(self, all_fds=False):
-        """ 关闭ioloop，并释放所有使用到的资源。关闭之前必须先stop。
-        如果all_fds是True，则同时关闭所有注册到该ioloop上的文件描述符。 """
+        """ 关闭ioloop，并释放所有使用到的资源。关闭之前必须先stop。 """
         self.remove_handler(self._waker.fileno())
-        if all_fds:
+        if all_fds:            # 如果all_fds是True，则同时关闭所有注册到该ioloop上的文件描述符
             for fd in self._handlers.keys()[:]:
                 try:
                     os.close(fd)
                 except Exception:
                     logging.debug("error closing fd %s", fd, exc_info=True)
-        self._waker.close() # 释放_waker管道
-        self._impl.close() # 释放epoll实例
+        self._waker.close()    # 释放_waker管道
+        self._impl.close()     # 释放epoll实例
 
     def add_handler(self, fd, handler, events):
         """ 为给定的文件描述符fd注册events事件的处理函数handler。 """
         self._handlers[fd] = stack_context.wrap(handler) # 在_handlers字典中以fd为键加入handler处理函数
-        self._impl.register(fd, events | self.ERROR) # 在epoll实例上为fd注册感兴趣的事件events|ERROR
+        self._impl.register(fd, events | self.ERROR)     # 在epoll实例上为fd注册感兴趣的事件events|ERROR
 
     def update_handler(self, fd, events):
         """ 改变给定的文件描述符fd感兴趣的事件。 """
@@ -110,8 +108,8 @@ class IOLoop(object):
 
     def remove_handler(self, fd):
         """ 移除给定的文件描述符的事件处理。 """
-        self._handlers.pop(fd, None) # 把fd及其对应的handler从_handlers中移除
-        self._events.pop(fd, None) # 把fd及其对应的未处理事件从_events中移除
+        self._handlers.pop(fd, None)  # 把fd及其对应的handler从_handlers中移除
+        self._events.pop(fd, None)    # 把fd及其对应的未处理事件从_events中移除
         try:
             self._impl.unregister(fd) # 在epoll实例上移动文件描述符fd的注册
         except (OSError, IOError):
@@ -122,7 +120,7 @@ class IOLoop(object):
         if not hasattr(signal, "setitimer"):
             logging.error("set_blocking_signal_threshold requires a signal module with the setitimer method")
             return
-        self._blocking_signal_threshold = seconds # 先记下秒数，闹钟不在此处设置
+        self._blocking_signal_threshold = seconds # 记下秒数，闹钟不在此处设置
         if seconds is not None:
             signal.signal(signal.SIGALRM, action if action is not None else signal.SIG_DFL) # 设置信号处理函数
 
@@ -136,76 +134,84 @@ class IOLoop(object):
                 self._blocking_signal_threshold, ''.join(traceback.format_stack(frame)))
 
     def start(self):
-        """ 开始IO事件循环。
-        IO事件循环开始后，会一直运行到某一个handler调用了stop方法，这将使得循环在处理完当前事件之后停止。 """
+        """ 开始IO事件循环。开始后，会运行直到调用了stop方法，这将使得循环在处理完当前事件之后停止。 """
         if self._stopped:
             self._stopped = False
             return
-        self._thread_ident = thread.get_ident() # 记录IOLoop所在的线程的id，用来判断操作是否在IOLoop线程
+        self._thread_ident = thread.get_ident() # 记录loop所在线程id，以判断add_callback是否是在loop线程
         self._running = True
         while True:
-            poll_timeout = 3600.0 # epoll的等待超时时间
+            poll_timeout = 3600.0 # epoll_wait超时时间，用于时间调度，若没有self._timeout则默认1小时
 
-            # 将新的callback推迟到下一轮事件循环中调用，以防止IO事件饥饿
+            ## 将新产生的callback推迟到下一轮loop中调用，以防止IO事件饥饿
             with self._callback_lock:
                 callbacks = self._callbacks
                 self._callbacks = []
-            for callback in callbacks: # 只运行callbacks里的callback
+            for callback in callbacks:
                 self._run_callback(callback)
 
-            if self._timeouts: # 基于时间的调度
+            ## 基于时间的调度：不断从self._timeouts这个小根堆中取出deadline最早的timeout任务，
+            ## 若deadline已到，则马上调用其callback；否则，重新调整poll_timeout以确保下次loop时能调用该timeout。
+            if self._timeouts:
                 now = time.time()
-                while self._timeouts: # _timeouts[0]是timeout值最小的
-                    if self._timeouts[0].callback is None: # 该timeout已经取消，直接pop掉
+                while self._timeouts:
+                    if self._timeouts[0].callback is None:
                         heapq.heappop(self._timeouts)
-                    elif self._timeouts[0].deadline <= now: # 该timeout已经到点，赶紧pop出来调用
+                    elif self._timeouts[0].deadline <= now:
                         timeout = heapq.heappop(self._timeouts)
                         self._run_callback(timeout.callback)
-                    else: # 还没有到点的timeout，则把epoll的等待时间阈值设为最近要到点的timeout还剩下的时间如果它比当前值更短的话
+                    else:
                         seconds = self._timeouts[0].deadline - now
                         poll_timeout = min(seconds, poll_timeout)
                         break
 
-            if self._callbacks: # 如果在处理callbacks和timeouts的时候又加入了新的callback，则epoll不等待，以免callback也一起等待
+            ## 如果在处理callbacks和timeouts的时候又加入了新的callback，则epoll_wait不等待，以免阻塞了callbacks
+            if self._callbacks:
                 poll_timeout = 0.0
 
-            if not self._running: # 检查运行标志。如果在处理callbacks和timeouts的时候调用了stop方法，则退出循环
+            ## 检查运行标志。如果在处理callbacks和timeouts的时候调用了stop方法，则退出循环
+            if not self._running:
                 break
 
+            ## 清空闹钟，使它在epoll_wait时不要发送
             if self._blocking_signal_threshold is not None:
-                signal.setitimer(signal.ITIMER_REAL, 0, 0) # 清空闹钟，使它在epoll在等待时不要发送
+                signal.setitimer(signal.ITIMER_REAL, 0, 0)
 
+            ## 调用epoll_wait以等待IO事件的发生
             try:
-                event_pairs = self._impl.poll(poll_timeout) # 等待IO事件
+                event_pairs = self._impl.poll(poll_timeout)
             except Exception, e:
                 if (getattr(e, 'errno', None) == errno.EINTR or
                     (isinstance(getattr(e, 'args', None), tuple) and len(e.args) == 2 and e.args[0] == errno.EINTR)):
-                    # epoll的poll操作等待超时，或者被信号处理函数打断，需要手动重启
                     continue
-                else: # 其他异常不做处理，直接抛出
+                else:
                     raise
 
-            if self._blocking_signal_threshold is not None: # 恢复闹钟
+            ## 恢复闹钟
+            if self._blocking_signal_threshold is not None:
                 signal.setitimer(signal.ITIMER_REAL, self._blocking_signal_threshold, 0)
 
-            self._events.update(event_pairs) # 将等待到的IO事件加入到_events中去
+            ## 此时epoll_wait已经返回，将返回的IO事件加入到self._events中去
+            self._events.update(event_pairs)
 
             # Since that handler may perform actions on other file descriptors,
             # there may be reentrant calls to this IOLoop that update self._events
-            # 每次从_events中pop出一个fd，然后运行它对应的handler。
+            ## 开始处理self._events，其中每一个元素都是一个(fd, events)，events是发生的事件
+            ## 通过之前注册的self._handlers[fd]来处理fd对应的events
             while self._events:
                 fd, events = self._events.popitem()
                 try:
                     self._handlers[fd](fd, events)
                 except (OSError, IOError), e:
-                    if e.args[0] == errno.EPIPE: # Happens when the client closes the connection
+                    if e.args[0] == errno.EPIPE: # 客户端关闭了连接
                         pass
                     else:
                         logging.error("Exception in I/O handler for fd %s", fd, exc_info=True)
                 except Exception:
                     logging.error("Exception in I/O handler for fd %s", fd, exc_info=True)
+            ## 处理完成后，进入到下一轮loop
 
-        # 退出循环后重置stopped标志，使其可以重新开始
+        ## loop已经退出，即已经调用了stop
         self._stopped = False
         if self._blocking_signal_threshold is not None: # 清除闹钟
             signal.setitimer(signal.ITIMER_REAL, 0, 0)
@@ -224,8 +230,8 @@ class IOLoop(object):
     def add_timeout(self, deadline, callback):
         """ 在IOLoop中，当deadline到点时调用callback。返回一个可用于取消的句柄。
         在其他线程调用该方法不安全，应该在IOLoop线程中添加（利用add_callback方法）。 """
-        timeout = _Timeout(deadline, stack_context.wrap(callback)) # _Timeout对象
-        heapq.heappush(self._timeouts, timeout) # _timeouts是个堆
+        timeout = _Timeout(deadline, stack_context.wrap(callback))
+        heapq.heappush(self._timeouts, timeout)
         return timeout
 
     def remove_timeout(self, timeout):
@@ -239,8 +245,7 @@ class IOLoop(object):
             list_empty = not self._callbacks
             self._callbacks.append(stack_context.wrap(callback))
         if list_empty and thread.get_ident() != self._thread_ident:
-            # 如果是在非IOLoop线程中加入callback到了一个空_callbacks集合中，则试图唤醒IOLoop
-            self._waker.wake()
+            self._waker.wake() # 如果是在非IOLoop线程中加入callback到了一个空_callbacks集合中，则试图唤醒IOLoop
 
     def _run_callback(self, callback):
         try:

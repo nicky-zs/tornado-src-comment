@@ -426,8 +426,8 @@ class IOStream(object):
         if loc == 0:
             return b("")
         _merge_prefix(self._read_buffer, loc) # 把前loc个字符调整到_read_buffer[0]的位置
-        self._read_buffer_size -= loc # 调整_read_buffer_size
-        return self._read_buffer.popleft() # 返回前loc个字符
+        self._read_buffer_size -= loc         # 调整_read_buffer_size
+        return self._read_buffer.popleft()    # 返回前loc个字符
 
     def _check_closed(self): # 若关闭则直接抛异常
         if not self.socket: # close方法中 self.socket = None
@@ -441,8 +441,8 @@ class IOStream(object):
                 self._add_io_state(ioloop.IOLoop.READ)
 
     def _add_io_state(self, state):
-        ## 在io_loop上注册事件通知(通过调用io_loop.add_handler)。
-        ## 事件处理方法统一都走self._handle_events，该方法主要用于改变感兴趣的通知。
+        # 在io_loop上注册事件通知(通过调用io_loop.add_handler)。
+        # 事件处理方法统一都走self._handle_events，该方法主要用于改变感兴趣的通知。
         if self.socket is None:
             return
         if self._state is None:        # 之前没注册过，则直接将参数state与上ERROR注册
